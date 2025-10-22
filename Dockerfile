@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     make \
-    openjdk-17-jre-headless \
+    default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # Install SSLyze
@@ -29,7 +29,7 @@ COPY Makefile /app/
 COPY .gitignore /app/
 
 # Verify sslyze installation
-RUN sslyze --version
+RUN sslyze --help > /dev/null 2>&1 && echo "SSLyze installed successfully"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -57,4 +57,4 @@ CMD ["/bin/bash"]
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD sslyze --version || exit 1
+    CMD sslyze --help > /dev/null 2>&1 || exit 1

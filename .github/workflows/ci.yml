@@ -57,7 +57,7 @@ jobs:
 
       - name: Verify SSLyze installation
         run: |
-          sslyze --version
+          sslyze --help | head -n 1
           which sslyze
 
       - name: Run syntax validation
@@ -109,7 +109,7 @@ jobs:
 
       - name: Verify SSLyze installation
         run: |
-          sslyze --version
+          sslyze --help | head -n 1
           which sslyze
 
       - name: Run syntax validation
@@ -146,7 +146,7 @@ jobs:
 
       - name: Verify SSLyze installation
         run: |
-          sslyze --version
+          sslyze --help | Select-Object -First 1
           where sslyze
 
       - name: Run syntax validation
