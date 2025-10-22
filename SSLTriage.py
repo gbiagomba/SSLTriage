@@ -21,7 +21,7 @@ import sys
 import re
 
 # Constants
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONFIG_FILE = os.path.expanduser("~/.ssltriage_config.json")
 TEMP_DIR = os.path.expanduser("~/tmp") if not os.path.exists("/tmp") else "/tmp"
 
@@ -156,11 +156,13 @@ class SSLTriageTab(ITab):
         # Scan mode dropdown
         mode_panel = JPanel(FlowLayout(FlowLayout.LEFT))
         mode_panel.add(JLabel("Scan mode:"))
-        scan_modes = ["--regular", "--full"]
-        default_mode = self._config.get("scan_mode", "--regular")
+        scan_modes = ["Quick Scan", "Standard Scan", "Full Scan"]
+        default_mode = self._config.get("scan_mode", "Standard Scan")
         self.scan_mode_combo = JComboBox(scan_modes)
         if default_mode in scan_modes:
             self.scan_mode_combo.setSelectedItem(default_mode)
+        else:
+            self.scan_mode_combo.setSelectedItem("Standard Scan")
         mode_panel.add(self.scan_mode_combo)
         self._panel.add(mode_panel)
 
@@ -363,8 +365,29 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
             target = "{}:{}".format(host, port)
             scan_mode = str(self._ui.scan_mode_combo.getSelectedItem())
 
-            # Build command
-            cmd = [sslyze_path, scan_mode, target, "--json_out", outfile]
+            # Build command based on scan mode
+            cmd = [sslyze_path]
+
+            if scan_mode == "Quick Scan":
+                # Quick scan - only check deprecated protocols
+                cmd.extend(["--sslv2", "--sslv3", "--tlsv1", "--tlsv1_1"])
+            elif scan_mode == "Standard Scan":
+                # Standard scan - check protocols and basic vulnerabilities
+                cmd.extend([
+                    "--sslv2", "--sslv3", "--tlsv1", "--tlsv1_1", "--tlsv1_2", "--tlsv1_3",
+                    "--certinfo", "--heartbleed", "--robot", "--compression"
+                ])
+            elif scan_mode == "Full Scan":
+                # Full scan - comprehensive testing
+                cmd.extend([
+                    "--sslv2", "--sslv3", "--tlsv1", "--tlsv1_1", "--tlsv1_2", "--tlsv1_3",
+                    "--certinfo", "--heartbleed", "--robot", "--compression",
+                    "--reneg", "--resum", "--fallback", "--openssl_ccs",
+                    "--http_headers", "--elliptic_curves", "--ems"
+                ])
+
+            # Add target and output file
+            cmd.extend([target, "--json_out", outfile])
 
             # Log command being executed
             cmd_str = " ".join(cmd)
@@ -447,24 +470,29 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
         """
         issues = ArrayList()
 
-        # Try multiple formats for server identification
-        server_id_formats = [
-            "{}:{}".format(host, port),
-            host,
-            "{}:{}".format(host, str(port))
-        ]
+        # SSLyze 6.x uses a list format for server_scan_results
+        server_scan_results = results.get("server_scan_results", [])
 
-        scan_data = None
-        for server_id in server_id_formats:
-            scan_data = results.get("server_scan_results", {}).get(server_id)
-            if scan_data:
-                break
-
-        if not scan_data:
+        if not server_scan_results or len(server_scan_results) == 0:
             self._ui.log("[!] No scan results found in JSON output for {}:{}".format(host, port))
             return None
 
-        # Define vulnerability checks
+        # Get the first (and usually only) scan result
+        scan_result_obj = server_scan_results[0]
+
+        # Check scan status
+        scan_status = scan_result_obj.get("scan_status")
+        if scan_status != "COMPLETED":
+            self._ui.log("[!] Scan did not complete successfully: {}".format(scan_status))
+            return None
+
+        # Get the actual scan data
+        scan_data = scan_result_obj.get("scan_result")
+        if not scan_data:
+            self._ui.log("[!] No scan data found in results")
+            return None
+
+        # Define vulnerability checks for deprecated protocols
         findings = {
             "ssl_2_0_cipher_suites": ("SSLv2 Supported - Deprecated Protocol", "High", "CWE-310"),
             "ssl_3_0_cipher_suites": ("SSLv3 Supported - POODLE Vulnerable", "High", "CWE-310"),
@@ -473,15 +501,26 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
         }
 
         for key, (desc, severity, cwe) in findings.items():
-            result = scan_data.get(key)
-            if result:
-                # Check if protocol is supported
-                if isinstance(result, dict):
-                    # Check for accepted cipher suites
+            cipher_scan = scan_data.get(key)
+            if cipher_scan and isinstance(cipher_scan, dict):
+                # Check scan status
+                if cipher_scan.get("status") == "COMPLETED":
+                    # Get the actual result
+                    result = cipher_scan.get("result", {})
+
+                    # Check if protocol is supported
+                    is_supported = result.get("is_tls_version_supported", False)
                     accepted_suites = result.get("accepted_cipher_suites", [])
-                    if accepted_suites and len(accepted_suites) > 0:
-                        cipher_list = ", ".join([suite.get("cipher_suite", {}).get("name", "Unknown")
-                                                 for suite in accepted_suites[:5]])
+
+                    if is_supported and len(accepted_suites) > 0:
+                        # Build cipher list
+                        cipher_list = ", ".join([
+                            suite.get("cipher_suite", {}).get("name", "Unknown")
+                            for suite in accepted_suites[:5]
+                        ])
+                        if len(accepted_suites) > 5:
+                            cipher_list += " (and {} more)".format(len(accepted_suites) - 5)
+
                         detail = "{} (CWE: {})\nAccepted ciphers: {}".format(desc, cwe, cipher_list)
 
                         issues.add(SSLTriageIssue(
@@ -493,19 +532,31 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
                         ))
 
         # Check for certificate issues
-        cert_info = scan_data.get("certificate_info")
-        if cert_info and isinstance(cert_info, dict):
-            cert_deployments = cert_info.get("certificate_deployments", [])
-            for deployment in cert_deployments:
-                verified_chain = deployment.get("verified_certificate_chain")
-                if verified_chain is None or not verified_chain:
-                    issues.add(SSLTriageIssue(
-                        "Invalid Certificate Chain",
-                        "The SSL/TLS certificate chain could not be verified (CWE: CWE-295)",
-                        "High",
-                        host,
-                        port
-                    ))
+        cert_info_scan = scan_data.get("certificate_info")
+        if cert_info_scan and isinstance(cert_info_scan, dict):
+            if cert_info_scan.get("status") == "COMPLETED":
+                cert_result = cert_info_scan.get("result", {})
+                cert_deployments = cert_result.get("certificate_deployments", [])
+
+                for deployment in cert_deployments:
+                    # Check if certificate chain is valid
+                    path_validation_results = deployment.get("path_validation_results", [])
+
+                    # Check if any trust store validation failed
+                    has_validation_error = False
+                    for validation in path_validation_results:
+                        if validation.get("was_validation_successful") == False:
+                            has_validation_error = True
+                            break
+
+                    if has_validation_error:
+                        issues.add(SSLTriageIssue(
+                            "Invalid Certificate Chain",
+                            "The SSL/TLS certificate chain could not be verified (CWE: CWE-295)",
+                            "High",
+                            host,
+                            port
+                        ))
 
         return issues if issues.size() > 0 else None
 

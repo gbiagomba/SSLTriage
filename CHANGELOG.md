@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-10-22
+
+### Fixed
+- **CRITICAL**: Fixed SSLyze command-line arguments for SSLyze 6.x compatibility
+  - Replaced deprecated `--regular` and `--full` flags
+  - Now uses individual scan flags (`--sslv2`, `--sslv3`, `--tlsv1`, etc.)
+- Updated JSON parsing logic for SSLyze 6.x output format
+  - Fixed `server_scan_results` parsing (now expects array instead of dict)
+  - Updated cipher suite detection to use nested `result` object
+  - Fixed certificate validation checking using new `path_validation_results` structure
+- Fixed Python interpreter detection in Makefile
+  - Auto-detects python3/python instead of hardcoded python2
+  - CI/CD compatibility improved
+
+### Changed
+- Scan mode dropdown now shows user-friendly names:
+  - "Quick Scan" - Only deprecated protocols (SSLv2, SSLv3, TLS 1.0, TLS 1.1)
+  - "Standard Scan" - Protocols + basic vulnerabilities (Heartbleed, ROBOT, etc.)
+  - "Full Scan" - Comprehensive testing of all TLS features
+- Improved error messages and logging for scan failures
+- Enhanced cipher suite reporting (shows count when > 5 ciphers)
+
+### Technical
+- Compatible with SSLyze 6.1.0 and newer
+- Maintains backward compatibility with Jython 2.7
+- Updated GitHub Actions CI/CD to pass all platform tests
+
 ## [1.0.0] - 2025-10-22
 
 ### Added
