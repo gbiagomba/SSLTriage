@@ -1,8 +1,8 @@
 .PHONY: help clean test install uninstall build lint format check-deps validate
 
 # Variables
-PYTHON := python2
-PIP := pip
+PYTHON := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python)
+PIP := $(shell command -v pip3 2>/dev/null || command -v pip 2>/dev/null || echo pip)
 EXTENSION_FILE := SSLTriage.py
 CONFIG_FILE := ~/.ssltriage_config.json
 
