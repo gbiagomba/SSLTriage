@@ -1,0 +1,297 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile SSLTriage.py
+
+      - name: Check for Python 3 syntax (f-strings)
+        run: |
+          if grep -n "f'" SSLTriage.py || grep -n 'f"' SSLTriage.py; then
+            echo "ERROR: f-strings found (not compatible with Jython 2.7)"
+            exit 1
+          fi
+          echo "No f-strings found - Jython 2.7 compatible"
+
+  test-linux:
+    name: Test on Linux (x64)
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install sslyze
+
+      - name: Verify SSLyze installation
+        run: |
+          sslyze --help | head -n 1
+          which sslyze
+
+      - name: Run syntax validation
+        run: |
+          python -m py_compile SSLTriage.py
+
+      - name: Run make test
+        run: |
+          make test
+
+  test-linux-arm64:
+    name: Test on Linux (ARM64)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and test on ARM64
+        run: |
+          docker buildx build --platform linux/arm64 -t ssltriage:arm64-test --target test .
+
+  test-macos:
+    name: Test on macOS
+    runs-on: macos-latest
+    needs: lint
+    strategy:
+      matrix:
+        arch: ['x64', 'arm64']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install sslyze
+
+      - name: Verify SSLyze installation
+        run: |
+          sslyze --help | head -n 1
+          which sslyze
+
+      - name: Run syntax validation
+        run: |
+          python -m py_compile SSLTriage.py
+
+      - name: Run make test
+        run: |
+          make test
+
+  test-windows:
+    name: Test on Windows
+    runs-on: windows-latest
+    needs: lint
+    strategy:
+      matrix:
+        arch: ['x64', 'arm64']
+        exclude:
+          - arch: arm64  # GitHub doesn't provide ARM64 Windows runners yet
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install sslyze
+
+      - name: Verify SSLyze installation
+        run: |
+          sslyze --help | Select-Object -First 1
+          where sslyze
+
+      - name: Run syntax validation
+        run: |
+          python -m py_compile SSLTriage.py
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [test-linux, test-macos, test-windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch Docker image
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ssltriage:latest \
+            --target final \
+            .
+
+  build:
+    name: Build Distribution
+    runs-on: ubuntu-latest
+    needs: [test-linux, test-macos, test-windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build distribution
+        run: |
+          make build
+
+      - name: Create package
+        run: |
+          make package
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssltriage-dist
+          path: dist/
+          retention-days: 90
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ssltriage-dist
+          path: dist/
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: SSLTriage v${{ steps.get_version.outputs.VERSION }}
+          body: |
+            ## SSLTriage v${{ steps.get_version.outputs.VERSION }}
+
+            ### Installation
+            1. Download `SSLTriage.py`
+            2. Install SSLyze: `pip install sslyze`
+            3. Load extension in Burp Suite
+
+            ### Changes
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ### Requirements
+            - Burp Suite (Pro or Community)
+            - Jython 2.7.x (standalone JAR)
+            - SSLyze 5.0.0 or newer
+
+            ### Platform Support
+            - ✅ Linux (x64, ARM64)
+            - ✅ macOS (Intel, Apple Silicon)
+            - ✅ Windows (x64)
+          files: |
+            dist/SSLTriage.py
+            dist/SSLTriage-v*.tar.gz
+            README.md
+            CHANGELOG.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-docker:
+    name: Publish Docker Image
+    runs-on: ubuntu-latest
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          target: final
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ssltriage:latest
+            ${{ secrets.DOCKER_USERNAME }}/ssltriage:${{ steps.get_version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
